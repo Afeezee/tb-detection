@@ -1,0 +1,35 @@
+# Local state — Railway does not need these.
+.git/
+.gitignore
+.gitattributes
+
+# Python / venv
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Frontend is built inside the Dockerfile's stage 1, but node_modules
+# and .next artefacts must never be uploaded (huge, and regenerated).
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Datasets — never upload raw data.
+data/
+
+# Hybrid checkpoint is 357 MB — exceeds railway up's Cloudflare limit.
+# Attach it after deploy via a Railway Volume or GitHub-source deploy.
+# DenseNet121 (the default demo model) still ships in this upload.
+models/hybrid_best.pt
+models/hybrid_roc.png
+results_summary.csv
+
+# Legacy Streamlit demo — not part of the FastAPI service.
+app.py
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

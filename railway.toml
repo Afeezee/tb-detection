@@ -1,20 +1,14 @@
-# Root Railway config — used by the BACKEND service.
-#
-# Monorepo layout:
-#   backend service  → root directory = "/" (this file, this Dockerfile).
-#   frontend service → root directory = "frontend/" (uses frontend/railway.toml).
-#
-# The Dockerfile is at backend/Dockerfile but the build context is the repo
-# root so it can COPY src/, config.py, and models/ alongside the backend code.
+# Single-service monorepo — one Dockerfile at the repo root builds the
+# Next.js static export in a Node stage and copies it into a Python
+# runtime that serves both the /api/* endpoints and the static frontend
+# on the same port.
 
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "backend/Dockerfile"
-watchPatterns = ["backend/**", "src/**", "config.py", "models/**", "railway.toml"]
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "uvicorn main:app --app-dir /app/backend --host 0.0.0.0 --port $PORT"
-healthcheckPath = "/health"
-healthcheckTimeout = 30
+healthcheckPath = "/api/health"
+healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

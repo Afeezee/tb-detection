@@ -1,16 +1,16 @@
 """FastAPI entrypoint for the TB detection service.
 
+Single-container deployment:
+- API is mounted under /api/*
+- The Next.js static export (frontend/out) is mounted at / so this container
+  serves both the UI and the API on the same port.
+
 Routes
 ------
-POST /predict?model=densenet121|hybrid  — classify an uploaded chest X-ray
-GET  /history?limit=50                  — recent predictions from Neon Postgres
-GET  /metrics                           — hardcoded benchmark table (both models,
-                                          internal + external TBX11K)
-GET  /health                            — Railway health check
-
-The service imports the training-time modules from src/ so preprocessing,
-architectures, and Grad-CAM stay bit-for-bit identical to what was validated
-during training.
+POST /api/predict?model=densenet121|hybrid  — classify an uploaded chest X-ray
+GET  /api/history?limit=50                  — recent predictions from Neon
+GET  /api/metrics                           — hardcoded benchmark table
+GET  /api/health                            — Railway health check
 """
 from __future__ import annotations
 
@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-# .env at the project root (one directory up from backend/)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -52,23 +53,7 @@ logging.basicConfig(level=logging.INFO)
 
 DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "densenet121")
 MODEL_DIR = Path(os.getenv("MODEL_DIR", str(config.MODELS_DIR))).resolve()
-
-
-def _parse_cors_origins() -> list[str]:
-    """Read allowed origins from FRONTEND_URL / CORS_ORIGINS (comma-separated).
-
-    Falls back to '*' for local development. Railway sets FRONTEND_URL to the
-    deployed frontend domain after the first deploy.
-    """
-    raw = os.getenv("CORS_ORIGINS") or os.getenv("FRONTEND_URL") or ""
-    origins = [o.strip() for o in raw.split(",") if o.strip()]
-    if not origins:
-        return ["*"]
-    # Always allow localhost dev regardless of prod list.
-    for local in ("http://localhost:3000", "http://127.0.0.1:3000"):
-        if local not in origins:
-            origins.append(local)
-    return origins
+STATIC_DIR = Path(os.getenv("FRONTEND_STATIC_DIR", "/app/frontend_static"))
 
 
 @asynccontextmanager
@@ -77,15 +62,14 @@ async def lifespan(app: FastAPI):
     available = service.registry.available()
     if not available:
         logger.warning(
-            "No checkpoints found in %s. /predict will return 503 until you add "
+            "No checkpoints found in %s. /api/predict will return 503 until you add "
             "densenet121_best.pt or hybrid_best.pt.",
             MODEL_DIR,
         )
     else:
-        # Warm the default so the first request is not slow.
         try:
             service.registry.get(DEFAULT_MODEL if DEFAULT_MODEL in available else available[0])
-        except Exception as exc:  # pragma: no cover - warm-up is best-effort
+        except Exception as exc:  # pragma: no cover
             logger.exception("Could not warm default model: %s", exc)
     app.state.inference = service
     yield
@@ -98,16 +82,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS is still permissive so a locally-run frontend against a remote backend
+# works during development. In production the frontend is same-origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_parse_cors_origins(),
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+api = APIRouter(prefix="/api")
 
-@app.get("/health", response_model=HealthResponse, tags=["system"])
+
+@api.get("/health", response_model=HealthResponse, tags=["system"])
 def health():
     service: InferenceService = app.state.inference
     return HealthResponse(
@@ -118,12 +106,12 @@ def health():
     )
 
 
-@app.get("/metrics", response_model=BenchmarkResponse, tags=["system"])
+@api.get("/metrics", response_model=BenchmarkResponse, tags=["system"])
 def metrics():
     return get_benchmarks()
 
 
-@app.post("/predict", response_model=PredictionResponse, tags=["inference"])
+@api.post("/predict", response_model=PredictionResponse, tags=["inference"])
 async def predict(
     file: UploadFile = File(..., description="Chest X-ray, PNG or JPEG"),
     model: Literal["densenet121", "hybrid"] = Query(
@@ -159,12 +147,12 @@ async def predict(
                 confidence=result["confidence"],
                 model_name=model,
                 patient_ref=patient_ref or None,
-                gradcam_path=None,  # base64 lives in the response; we do not write to disk here
+                gradcam_path=None,
                 clinician_notes=clinician_notes or None,
             )
         except RuntimeError as exc:
             logger.warning("Skipping Neon persistence: %s", exc)
-        except Exception as exc:  # pragma: no cover - db failures should not break inference
+        except Exception as exc:  # pragma: no cover
             logger.exception("Failed to persist prediction: %s", exc)
 
     return PredictionResponse(
@@ -181,7 +169,7 @@ async def predict(
     )
 
 
-@app.get("/history", response_model=HistoryResponse, tags=["records"])
+@api.get("/history", response_model=HistoryResponse, tags=["records"])
 def history(limit: int = Query(50, ge=1, le=500)):
     try:
         rows = db.fetch_history(limit=limit)
@@ -190,3 +178,21 @@ def history(limit: int = Query(50, ge=1, le=500)):
 
     items = [HistoryRow(**dict(row)) for row in rows]
     return HistoryResponse(count=len(items), items=items)
+
+
+app.include_router(api)
+
+
+# ---------------------------------------------------------------------------
+# Static frontend — mounted at "/" AFTER the API router so /api/* still resolves.
+# ---------------------------------------------------------------------------
+if STATIC_DIR.exists():
+    # SPA-style: unknown paths fall back to index.html so trailing-slash routes
+    # like /predict/ resolve to the static export produced by `next build`.
+    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+else:
+    logger.warning("Static frontend directory %s not found — UI will 404.", STATIC_DIR)
+
+    @app.get("/")
+    def _no_static():
+        return {"detail": "Frontend not built into this image."}
