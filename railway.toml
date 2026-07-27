@@ -1,21 +1,20 @@
-# Repo-root Railway config — documents the monorepo layout.
+# Root Railway config — used by the BACKEND service.
 #
-# Railway does not deploy from this root file directly. Each service is
-# configured against its own sub-directory (see backend/railway.toml and
-# frontend/railway.toml) with the service's "Root Directory" set in Railway
-# to `backend` or `frontend` respectively.
+# Monorepo layout:
+#   backend service  → root directory = "/" (this file, this Dockerfile).
+#   frontend service → root directory = "frontend/" (uses frontend/railway.toml).
 #
-# Service map (single Railway project, two services):
-#   backend  — Python 3.11, Dockerfile at backend/Dockerfile,
-#              build context is the repo root so it can COPY src/, config.py, models/.
-#   frontend — Node 20, Nixpacks build (npm install → npm run build → npm start).
-#
-# Required environment variables (see .env.example):
-#   NEON_DATABASE_URL   — Neon Postgres connection string (backend service only).
-#   MODEL_DIR           — Path to model checkpoints inside the container (defaults to /app/models).
-#   DEFAULT_MODEL       — densenet121 or hybrid (backend service).
-#   FRONTEND_URL        — Public URL of the frontend service (set as a shared variable
-#                         after the first deploy so backend CORS accepts it).
-#   NEXT_PUBLIC_API_BASE_URL — Public URL of the backend service (frontend build-time).
-#
-# Deployment steps live in README.md → "Deploy to Railway".
+# The Dockerfile is at backend/Dockerfile but the build context is the repo
+# root so it can COPY src/, config.py, and models/ alongside the backend code.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "backend/Dockerfile"
+watchPatterns = ["backend/**", "src/**", "config.py", "models/**", "railway.toml"]
+
+[deploy]
+startCommand = "uvicorn main:app --app-dir /app/backend --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
