@@ -300,13 +300,11 @@ export async function exportDocx(data: ReportData): Promise<void> {
               new ImageRun({
                 data: originalPng,
                 transformation: { width: 260, height: 260 },
-                type: "png",
               }),
               new TextRun({ text: "  " }),
               new ImageRun({
                 data: gradcamPng,
                 transformation: { width: 260, height: 260 },
-                type: "png",
               }),
             ],
           }),
