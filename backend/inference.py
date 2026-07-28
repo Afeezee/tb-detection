@@ -66,7 +66,11 @@ class ModelRegistry:
                     f"Checkpoint missing: {ckpt_path}. Place the trained .pt file there before starting the API."
                 )
             model = get_model(name, num_classes=config.NUM_CLASSES, pretrained=False)
-            state = torch.load(ckpt_path, map_location=self.device)
+            # weights_only=False because our checkpoints wrap model_state_dict in
+            # a training-time dict (optimizer state, epoch, metrics). PyTorch 2.6+
+            # defaults to True which rejects non-tensor pickle entries. Safe here
+            # because these files are produced by our own training runs.
+            state = torch.load(ckpt_path, map_location=self.device, weights_only=False)
             state_dict = state.get("model_state_dict", state) if isinstance(state, dict) else state
             model.load_state_dict(state_dict)
             model.to(self.device).eval()
