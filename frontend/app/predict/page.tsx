@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import ImageDropzone from "@/components/ImageDropzone";
 import ResultBadge from "@/components/ResultBadge";
 import { postPrediction, type ModelName, type PredictionResponse } from "@/lib/api";
-import { exportReport } from "@/lib/report";
+import { exportPdf, exportDocx, fileToBase64, type ReportData } from "@/lib/report";
 
 export default function PredictPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -15,8 +15,39 @@ export default function PredictPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PredictionResponse | null>(null);
+  const [exporting, setExporting] = useState<"pdf" | "docx" | null>(null);
 
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
+
+  async function buildReportData(): Promise<ReportData | null> {
+    if (!file || !result) return null;
+    const originalImageBase64 = await fileToBase64(file);
+    return {
+      patientRef: patientRef.trim() || result.patient_ref || "",
+      timestamp: new Date(result.created_at),
+      label: result.label,
+      confidence: result.confidence,
+      modelUsed: result.model_used,
+      probabilities: result.probabilities,
+      clinicianNotes: clinicianNotes.trim() || undefined,
+      originalImageBase64,
+      gradcamBase64: result.gradcam_base64,
+    };
+  }
+
+  async function handleExport(kind: "pdf" | "docx") {
+    setExporting(kind);
+    try {
+      const data = await buildReportData();
+      if (!data) return;
+      if (kind === "pdf") exportPdf(data);
+      else await exportDocx(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to build ${kind}`);
+    } finally {
+      setExporting(null);
+    }
+  }
 
   async function runInference() {
     if (!file) return;
@@ -201,66 +232,23 @@ export default function PredictPage() {
                 </div>
               </dl>
 
-              <button
-                type="button"
-                onClick={() => exportReport("report-source")}
-                className="w-full rounded-md border border-clinical-border px-4 py-2 text-sm font-medium text-clinical-ink hover:bg-clinical-bg"
-              >
-                Export PDF report
-              </button>
-
-              {/* Hidden source for the print/PDF window. */}
-              <div id="report-source" className="hidden">
-                <h1>Tuberculosis screening report</h1>
-                <p className="muted">
-                  Generated {new Date(result.created_at).toLocaleString("en-GB")} · Reference{" "}
-                  {result.patient_ref || "—"}
-                </p>
-                <div className="card">
-                  <div>
-                    Prediction:{" "}
-                    <span className={result.label === "TB-positive" ? "positive" : "negative"}>
-                      {result.label}
-                    </span>{" "}
-                    (confidence {(result.confidence * 100).toFixed(1)}%)
-                  </div>
-                  <div>Model: {result.model_used}</div>
-                </div>
-                <div className="row">
-                  <div className="card">
-                    <div className="muted">Uploaded image</div>
-                    {previewUrl && <img src={previewUrl} alt="upload" />}
-                  </div>
-                  <div className="card">
-                    <div className="muted">Grad-CAM overlay</div>
-                    <img
-                      src={`data:image/png;base64,${result.gradcam_base64}`}
-                      alt="gradcam"
-                    />
-                  </div>
-                </div>
-                <table>
-                  <tbody>
-                    <tr>
-                      <th>P(Normal)</th>
-                      <td>{(result.probabilities["Normal"] * 100).toFixed(1)}%</td>
-                    </tr>
-                    <tr>
-                      <th>P(TB-positive)</th>
-                      <td>{(result.probabilities["TB-positive"] * 100).toFixed(1)}%</td>
-                    </tr>
-                    {clinicianNotes && (
-                      <tr>
-                        <th>Notes</th>
-                        <td>{clinicianNotes}</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-                <p className="muted" style={{ marginTop: 16 }}>
-                  Research prototype — not a licensed medical device. Results must be reviewed by
-                  a qualified clinician.
-                </p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleExport("pdf")}
+                  disabled={exporting !== null}
+                  className="rounded-md border border-clinical-border px-4 py-2 text-sm font-medium text-clinical-ink hover:bg-clinical-bg disabled:opacity-50"
+                >
+                  {exporting === "pdf" ? "Building PDF…" : "Export as PDF"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExport("docx")}
+                  disabled={exporting !== null}
+                  className="rounded-md border border-clinical-border px-4 py-2 text-sm font-medium text-clinical-ink hover:bg-clinical-bg disabled:opacity-50"
+                >
+                  {exporting === "docx" ? "Building Word…" : "Export as Word (.docx)"}
+                </button>
               </div>
             </>
           )}
