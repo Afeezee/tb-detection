@@ -58,6 +58,15 @@ STATIC_DIR = Path(os.getenv("FRONTEND_STATIC_DIR", "/app/frontend_static"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure the Neon table exists. Idempotent (CREATE TABLE IF NOT EXISTS).
+    # Swallow errors so a temporary DB blip does not block the container from
+    # coming up — /history will surface a 503 in that case, but /predict and
+    # everything else stays available.
+    try:
+        db.init_db()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("db.init_db() failed at startup: %s", exc)
+
     service = InferenceService(models_dir=MODEL_DIR)
     available = service.registry.available()
     if not available:

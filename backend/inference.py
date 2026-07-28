@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
+import os
 import sys
 import threading
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 import torch
+
+logger = logging.getLogger("tb_backend.inference")
 
 # Make project root importable so `import config` and `from src.<mod>` both
 # resolve — the existing modules assume this layout.
@@ -33,6 +38,40 @@ from src.data_preprocessing import apply_clahe  # noqa: E402
 
 CLASS_NAMES = {0: "Normal", 1: "TB-positive"}
 SUPPORTED_MODELS = ("densenet121", "hybrid")
+
+# LFS pointer files are ~130 bytes and start with this magic string.
+_LFS_POINTER_MAGIC = b"version https://git-lfs.github.com/spec/"
+_LFS_POINTER_MAX_BYTES = 4096
+
+
+def _is_lfs_pointer(path: Path) -> bool:
+    """A checkpoint file is a Git LFS pointer stub if it's tiny and starts with
+    the LFS spec header. Real .pt files are megabytes and start with a torch
+    pickle magic byte."""
+    try:
+        if path.stat().st_size > _LFS_POINTER_MAX_BYTES:
+            return False
+        with path.open("rb") as f:
+            head = f.read(len(_LFS_POINTER_MAGIC))
+        return head == _LFS_POINTER_MAGIC
+    except OSError:
+        return False
+
+
+def _download_checkpoint(url: str, dest: Path) -> None:
+    """Stream a checkpoint from a public URL to disk. Used to recover from LFS
+    pointer stubs when Railway's build did not resolve LFS content."""
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    logger.info("Downloading checkpoint from %s to %s", url, dest)
+    with urllib.request.urlopen(url) as resp, tmp.open("wb") as out:
+        # 4 MiB chunks — small enough to stream, large enough to be efficient.
+        while True:
+            chunk = resp.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+    tmp.replace(dest)
+    logger.info("Downloaded %s (%.1f MB)", dest.name, dest.stat().st_size / 1e6)
 
 
 def get_device() -> torch.device:
@@ -52,7 +91,13 @@ class ModelRegistry:
         return self.models_dir / f"{name}_best.pt"
 
     def available(self) -> list[str]:
-        return [m for m in SUPPORTED_MODELS if self._checkpoint_path(m).exists()]
+        """A checkpoint is "available" if it is on disk AND is a real .pt file.
+        LFS pointer stubs are treated as missing so we don't attempt torch.load
+        on them; the URL-based recovery in get() handles the download."""
+        return [
+            m for m in SUPPORTED_MODELS
+            if self._checkpoint_path(m).exists() and not _is_lfs_pointer(self._checkpoint_path(m))
+        ]
 
     def get(self, name: str) -> torch.nn.Module:
         if name not in SUPPORTED_MODELS:
@@ -60,11 +105,24 @@ class ModelRegistry:
         with self._lock:
             if name in self._cache:
                 return self._cache[name]
+
             ckpt_path = self._checkpoint_path(name)
-            if not ckpt_path.exists():
-                raise FileNotFoundError(
-                    f"Checkpoint missing: {ckpt_path}. Place the trained .pt file there before starting the API."
-                )
+
+            # Recover from Railway's non-LFS clone: if the file is missing or is
+            # a Git LFS pointer stub, download the real weights from a public URL
+            # supplied via MODEL_<NAME>_URL (e.g. a GitHub Release asset).
+            if not ckpt_path.exists() or _is_lfs_pointer(ckpt_path):
+                url = os.getenv(f"MODEL_{name.upper()}_URL", "").strip()
+                if not url:
+                    raise FileNotFoundError(
+                        f"Checkpoint for '{name}' is missing or is a Git LFS pointer "
+                        f"and no MODEL_{name.upper()}_URL is set. Upload the .pt file "
+                        f"as a GitHub Release asset and set the env var to its "
+                        f"browser_download_url."
+                    )
+                ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                _download_checkpoint(url, ckpt_path)
+
             model = get_model(name, num_classes=config.NUM_CLASSES, pretrained=False)
             # weights_only=False because our checkpoints wrap model_state_dict in
             # a training-time dict (optimizer state, epoch, metrics). PyTorch 2.6+
